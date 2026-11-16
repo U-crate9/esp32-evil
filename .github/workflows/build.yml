@@ -19,11 +19,11 @@ jobs:
 
       - name: Compile Sketch
         run: |
-          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=default .
+          arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=default esp32-evil/esp32-evil.ino
 
       - name: Upload Binary Artifact
         uses: actions/upload-artifact@v4
         with:
           name: firmware-bin
-          path: build/esp32.esp32.esp32/*.bin
+          path: esp32-evil/build/esp32.esp32.esp32/*.bin
 
