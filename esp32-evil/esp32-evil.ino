@@ -101,7 +101,7 @@ int mkBeacon(uint8_t *b, const uint8_t *bs, const char *ss, uint8_t sl, uint8_t 
 
 uint8_t injIf = WIFI_IF_AP;
 inline void inj(uint8_t *f, int n) {
-  if (esp_wifi_80211_tx(injIf, f, n, false) == ESP_OK) txOk++; else txFail++;
+  if (esp_wifi_80211_tx((wifi_interface_t)injIf, f, n, false) == ESP_OK) txOk++; else txFail++;
 }
 void injProbe() {
   uint8_t f[26]; const uint8_t bc[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
