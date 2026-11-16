@@ -4,7 +4,6 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
-#include <esp_wifi.h>
 #include <esp_rom_delay.h>
 
 #define CTRL_SSID "JAM-CTL"
