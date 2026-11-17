@@ -1,11 +1,10 @@
 /* =========================================================
-   ESP32 Evil-Twin / Jammer  v7 — UART control via ESP-01
+   ESP32 Evil-Twin / Jammer  v7.1 — Fixed Rom Delay Header
    ========================================================= */
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <esp_wifi.h>
-#include <esp_rom_delay.h>
 
 #define CTL Serial2
 #define AP_MAXCONN 4
