@@ -19,13 +19,13 @@ jobs:
           arduino-cli core update-index --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
           arduino-cli core install esp8266:esp8266 --additional-urls https://arduino.esp8266.com/stable/package_esp8266com_index.json
 
-      - name: Compile ESP-01 Sketch
+      - name: Compile ESP-01
         run: |
-          mkdir -p build_out
-          arduino-cli compile --fqbn esp8266com:esp8266:generic:eesz=4M1M,lwip=v2,cpu=80 --output-dir build_out esp01_source/esp01_bridge.ino
+          mkdir -p esp01_out
+          arduino-cli compile --fqbn esp8266com:esp8266:esp01:eesz=1M64 --output-dir esp01_out esp01_source/esp01_bridge.ino
 
-      - name: Upload Binary Artifact
+      - name: Upload ESP-01 Artifact
         uses: actions/upload-artifact@v3
         with:
-          name: esp01-bridge-bin
-          path: build_out/*.bin
+          name: esp01-bridge-binary
+          path: esp01_out/*.bin
