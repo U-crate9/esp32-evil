@@ -7,7 +7,7 @@
 #include <esp_wifi.h>
 #include <HardwareSerial.h>
 
-#define BT_BAUD 9600          
+#define BT_BAUD 115200          
 HardwareSerial BT(2);         
 #define CTL BT
 
